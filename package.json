@@ -1,0 +1,16 @@
+{
+    "name": "strategic-card-game",
+    "version": "1.0.0",
+    "description": "Premium Strategic Card Game Online",
+    "main": "index.html",
+    "scripts": {
+        "start": "npx serve .",
+        "dev": "npx serve ."
+    },
+    "keywords": [],
+    "author": "Antigravity",
+    "license": "MIT",
+    "dependencies": {
+        "serve": "^14.2.0"
+    }
+}

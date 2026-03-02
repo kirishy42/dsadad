@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>戦略コンボカードゲーム - Online</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700&family=Noto+Sans+JP:wght@400;700&display=swap"
+        rel="stylesheet">
+</head>
+
+<body>
+    <div id="game-container" class="app-container">
+
+        <div id="title-screen" class="screen active">
+            <div class="glass-panel">
+                <h1 class="glow-text">Strategic Cards</h1>
+                <p class="subtitle">叡智と駆け引きのオンラインバトル</p>
+                <div class="auth-form">
+                    <div class="input-group">
+                        <label>ユーザー名</label>
+                        <input type="text" id="username-input" placeholder="名乗る名を入力せよ" maxlength="10">
+                    </div>
+                    <div class="input-group">
+                        <label>合言葉</label>
+                        <input type="password" id="password-input" placeholder="456123">
+                    </div>
+                </div>
+                <div class="button-group">
+                    <button class="premium-btn" onclick="game.tryLogin()">マッチング開始</button>
+                    <button class="premium-btn secondary" onclick="alert('遊び方: 全10ラウンドの入札バトル。被れば獲得なし！')">遊び方</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- マッチング画面 -->
+        <div id="matching-screen" class="screen">
+            <div class="glass-panel">
+                <h1 class="glow-text">MATCHING...</h1>
+                <p class="subtitle">対戦相手を探しています</p>
+                <div class="matching-status">
+                    <div class="spinner"></div>
+                    <p id="matching-count">現在 1/5 名待機中...</p>
+                </div>
+                <div id="matched-players" class="player-list-chips">
+                    <div class="chip">あなた</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- キャラクター選択画面 -->
+        <div id="char-selection-screen" class="screen">
+            <div class="glass-panel wide">
+                <h1 class="glow-text">秘策を選択</h1>
+                <p class="subtitle">この戦いを支配する自身の能力を選べ</p>
+                <div id="char-options" class="card-grid">
+                    <!-- キャラクターカードがここに動的に追加される -->
+                </div>
+            </div>
+        </div>
+
+        <!-- プレイ画面 -->
+        <div id="main-game-screen" class="screen">
+            <div class="game-layout">
+                <!-- 上部: 相手のステータス -->
+                <div class="opponents-bar" id="opponents-bar">
+                    <!-- Dynamic Opponents -->
+                </div>
+
+                <!-- 中央: 場 -->
+                <div class="field-area">
+                    <div class="top-row">
+                        <div class="round-indicator">ROUND <span id="current-round">1</span>/10</div>
+                        <div class="timer-display">TIME: <span id="timer-sec">60</span>s</div>
+                    </div>
+
+                    <div id="reward-slots" class="reward-grid">
+                        <!-- Rewards and Acquirers here -->
+                    </div>
+
+                    <div class="field-label">大きい数字を出した順に左から取得（被りは無効）</div>
+                </div>
+
+                <!-- 下部: 自分のエリア -->
+                <div class="player-area">
+                    <div class="my-status">
+                        <div id="my-character-card" class="character-preview">
+                            <!-- 自分のキャラカード -->
+                        </div>
+                        <div id="character-effect-panel" class="effect-panel">
+                            <div class="panel-label">能力</div>
+                            <div id="panel-effect-text" class="panel-text">--</div>
+                        </div>
+                        <div class="inventory-summary">
+                            <div>獲得カード: <span id="my-inventory-count">0</span>枚</div>
+                            <div id="my-inventory-list" class="mini-cards"></div>
+                        </div>
+                    </div>
+
+                    <div class="hand-container">
+                        <div id="my-hand" class="card-row selectable horizontal-scroll">
+                            <!-- 手札 (1-10) -->
+                        </div>
+                        <p class="instruction">手札を選択せよ。他者のカードは提出まで裏側にされます。</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- リザルト画面 -->
+        <div id="result-screen" class="screen">
+            <div class="glass-panel wide">
+                <h1 id="winner-announcement" class="glow-text">RESOLUTION</h1>
+                <div id="final-results" class="results-table">
+                    <!-- 最終得点とキャラ公開 -->
+                </div>
+                <button class="premium-btn" onclick="location.reload()">再戦を申し込む</button>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- オーディオ要素 -->
+    <audio id="bgm" src="bin/BGM.mp3" loop></audio>
+
+    <!-- スクリプト (依存順) -->
+    <script src="js/logic.js"></script>
+    <script src="js/game.js"></script>
+</body>
+
+</html>
