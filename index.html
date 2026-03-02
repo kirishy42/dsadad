@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>戦略コンボカードゲーム - Online</title>
+    <title>戦略コンボカードゲーム - Real-time Online</title>
     <link rel="stylesheet" href="css/style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -127,8 +127,33 @@
     <!-- オーディオ要素 -->
     <audio id="bgm" src="bin/BGM.mp3" loop></audio>
 
-    <!-- スクリプト (依存順) -->
+    <!-- Firebase SDK (Compat) -->
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
+
     <script src="js/logic.js"></script>
+    <script>
+        // ユーザーから提供された設定
+        const firebaseConfig = {
+            apiKey: "AIzaSyCbbMs6hPs4glmqrFX1RMVbJEad2I1xQcE",
+            authDomain: "fir-cards-game.firebaseapp.com",
+            projectId: "fir-cards-game",
+            storageBucket: "fir-cards-game.firebasestorage.app",
+            messagingSenderId: "1040511080226",
+            appId: "1:1040511080226:web:baa8e62d50c987eaddf77b",
+            databaseURL: "https://fir-cards-game-default-rtdb.firebaseio.com" // US-Central default
+        };
+
+        // 初期化
+        try {
+            firebase.initializeApp(firebaseConfig);
+            window.database = firebase.database();
+            console.log("Firebase initialized successfully.");
+        } catch (e) {
+            console.error("Firebase initialization failed:", e);
+            alert("Firebaseの初期化に失敗しました。設定を確認してください。\n" + e.message);
+        }
+    </script>
     <script src="js/game.js"></script>
 </body>
 
