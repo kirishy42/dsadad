@@ -1,5 +1,5 @@
 /**
- * 戦略カードゲーム - リアルタイム通信版 (Firebase 安定化Ver + カウントダウン)
+ * 戦略カードゲーム - リアルタイム通信版 (Firebase 安定化Ver 2.0)
  */
 
 class GameController {
@@ -15,7 +15,7 @@ class GameController {
         this.deck = [];
         this.timer = 60;
         this.timerInterval = null;
-        this.currentPhase = "";
+        this.currentPhase = ""; // 内部フェーズ
         this.audioCtx = null;
         this.bgm = document.getElementById('bgm');
 
@@ -23,45 +23,38 @@ class GameController {
     }
 
     playSE(type) {
-        if (!this.audioCtx) this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const ctx = this.audioCtx;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-
-        if (type === 'select') {
-            osc.type = 'sine'; osc.frequency.setValueAtTime(440, ctx.currentTime);
-            osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.1);
-            gain.gain.setValueAtTime(0.1, ctx.currentTime);
-            osc.start(); osc.stop(ctx.currentTime + 0.1);
-        } else if (type === 'resolve') {
-            osc.type = 'square'; osc.frequency.setValueAtTime(220, ctx.currentTime);
-            gain.gain.setValueAtTime(0.05, ctx.currentTime); osc.start(); osc.stop(ctx.currentTime + 0.2);
-        } else if (type === 'match') {
-            osc.type = 'triangle'; osc.frequency.setValueAtTime(523, ctx.currentTime);
-            gain.gain.setValueAtTime(0.1, ctx.currentTime); osc.start(); osc.stop(ctx.currentTime + 0.3);
-        }
+        try {
+            if (!this.audioCtx) this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const ctx = this.audioCtx;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain); gain.connect(ctx.destination);
+            if (type === 'select') {
+                osc.type = 'sine'; osc.frequency.setValueAtTime(440, ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.1);
+                gain.gain.setValueAtTime(0.1, ctx.currentTime); osc.start(); osc.stop(ctx.currentTime + 0.1);
+            } else if (type === 'resolve') {
+                osc.type = 'square'; osc.frequency.setValueAtTime(220, ctx.currentTime);
+                gain.gain.setValueAtTime(0.05, ctx.currentTime); osc.start(); osc.stop(ctx.currentTime + 0.2);
+            } else if (type === 'match') {
+                osc.type = 'triangle'; osc.frequency.setValueAtTime(523, ctx.currentTime);
+                gain.gain.setValueAtTime(0.1, ctx.currentTime); osc.start(); osc.stop(ctx.currentTime + 0.3);
+            }
+        } catch (e) { }
     }
 
     tryLogin() {
-        const usernameInput = document.getElementById('username-input');
-        const passwordInput = document.getElementById('password-input');
-        const username = usernameInput ? usernameInput.value.trim() : "";
-        const password = passwordInput ? passwordInput.value : "";
+        const uIn = document.getElementById('username-input');
+        const pIn = document.getElementById('password-input');
+        const username = uIn ? uIn.value.trim() : "";
+        const password = pIn ? pIn.value : "";
+        if (!username) { alert("名乗る名を入力してください。"); return; }
+        if (password !== "456123") { alert("合言葉が違うようです。"); return; }
+        if (!window.database) { alert("通信の準備ができていません。設定を確認してください。"); return; }
 
-        if (!username) { alert("名乗る名を入力してくれ。"); return; }
-        if (password !== "456123") { alert("合言葉が違うようだ。"); return; }
-
-        if (!window.database) {
-            alert("通信の準備ができていません。index.htmlのFirebase設定を確認してください。");
-            return;
-        }
-
-        this.myPlayerId = "player_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
+        this.myPlayerId = "p_" + Date.now() + "_" + Math.floor(Math.random() * 10000);
         this.roomId = "room_" + password;
         this.roomRef = window.database.ref('rooms/' + this.roomId);
-
         this.joinRoom(username);
     }
 
@@ -84,27 +77,33 @@ class GameController {
         this.roomRef.child('players').child(this.myPlayerId).set(myData);
         this.roomRef.child('players').child(this.myPlayerId).onDisconnect().remove();
 
-        this.roomRef.child('players').on('value', (snapshot) => {
-            const data = snapshot.val();
+        // プレイヤー監視
+        this.roomRef.child('players').on('value', (snap) => {
+            const data = snap.val();
             if (!data) return;
+            const plist = Object.values(data).sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
+            this.players = plist;
 
-            this.players = Object.values(data).sort((a, b) => a.joinedAt - b.joinedAt);
+            // ホスト判定（リストの最初が自分ならホスト）
+            const wasHost = this.isHost;
             this.isHost = (this.players[0].id === this.myPlayerId);
 
+            if (this.isHost && !wasHost) console.log("You are now the HOST.");
+
             this.updateMatchingUI();
-            this.checkStartConditionSync();
+            this.checkAutoStart();
         });
 
-        this.roomRef.child('gameStatus').on('value', (snapshot) => {
-            const status = snapshot.val();
+        // 進行管理監視
+        this.roomRef.child('gameStatus').on('value', (snap) => {
+            const status = snap.val();
             if (!status) return;
 
-            // カウントダウン開始命令を受け取った場合
-            if (status.phase === 'counting' && this.currentPhase !== 'counting') {
-                this.startCountdownUI(status.startTime);
-            }
+            console.log("Status Sync:", status.phase);
 
-            if (status.phase === 'selection' && this.currentPhase !== 'selection') {
+            if (status.phase === 'counting' && this.currentPhase !== 'counting') {
+                this.handleCounting(status.serverTime || Date.now());
+            } else if (status.phase === 'selection' && this.currentPhase !== 'selection') {
                 this.goToCharSelection();
             } else if (status.phase === 'playing' && (this.currentPhase !== 'playing' || this.round !== status.round)) {
                 this.round = status.round;
@@ -116,9 +115,8 @@ class GameController {
 
     updateMatchingUI() {
         const listEl = document.getElementById('matched-players');
-        const countEl = document.getElementById('matching-count');
+        if (!listEl) return;
         listEl.innerHTML = '';
-
         this.players.forEach(p => {
             const chip = document.createElement('div');
             chip.className = 'chip';
@@ -126,81 +124,70 @@ class GameController {
             listEl.appendChild(chip);
         });
 
-        if (this.currentPhase === "counting") return; // カウントダウン中なら表示を変えない
-        countEl.textContent = `現在 ${this.players.length} 名待機中... (3名以上で開始)`;
+        const countEl = document.getElementById('matching-count');
+        if (this.currentPhase === 'counting') {
+            // カウントダウン表示は別で行う
+        } else {
+            countEl.textContent = `現在 ${this.players.length} 名待機中... (3名以上で自動開始)`;
+        }
     }
 
-    checkStartConditionSync() {
+    checkAutoStart() {
         if (!this.isHost || this.currentPhase !== "") return;
 
         if (this.players.length >= 3) {
-            this.startCountingPhase();
+            this.roomRef.child('gameStatus').set({
+                phase: 'counting',
+                serverTime: firebase.database.ServerValue.TIMESTAMP
+            });
         } else {
-            if (!this.matchingTimeout) {
-                this.matchingTimeout = setTimeout(() => {
-                    if (this.players.length < 3 && this.isHost && this.currentPhase === "") {
-                        this.fillWithAI();
+            if (!this.matchingTimer) {
+                this.matchingTimer = setTimeout(() => {
+                    if (this.isHost && this.players.length < 3 && this.currentPhase === "") {
+                        this.fillBots();
                     }
-                }, 15000);
+                }, 10000); // 10秒待機
             }
         }
     }
 
-    fillWithAI() {
-        const names = ["信長(AI)", "秀吉(AI)", "家康(AI)", "幸村(AI)", "政宗(AI)"];
+    fillBots() {
+        const botNames = ["信長", "秀吉", "家康", "謙信", "信玄"];
         while (this.players.length < 3) {
-            const aiId = "ai_" + Date.now() + "_" + this.players.length;
-            const name = names.splice(Math.floor(Math.random() * names.length), 1)[0];
-            const aiData = {
-                id: aiId,
-                name: name,
+            const bId = "bot_" + Math.random().toString(36).substr(2, 9);
+            const bName = botNames.splice(Math.floor(Math.random() * botNames.length), 1)[0] + "(AI)";
+            const bData = {
+                id: bId,
+                name: bName,
                 isHuman: false,
                 hand: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
                 inventory: [],
                 character: CHARACTERS[Math.floor(Math.random() * CHARACTERS.length)],
-                selectedValue: null,
-                hasPlayed: false,
-                joinedAt: firebase.database.ServerValue.TIMESTAMP + this.players.length
+                joinedAt: Date.now() + this.players.length
             };
-            this.roomRef.child('players').child(aiId).set(aiData);
+            this.roomRef.child('players').child(bId).set(bData);
         }
     }
 
-    startCountingPhase() {
+    handleCounting(startTime) {
         this.currentPhase = "counting";
-        this.roomRef.child('gameStatus').set({
-            phase: 'counting',
-            startTime: firebase.database.ServerValue.TIMESTAMP
-        });
-
-        // 5秒後にゲームメイン開始
-        setTimeout(() => {
-            if (this.isHost) {
-                this.startGamePhase();
-            }
-        }, 5000);
-    }
-
-    startCountdownUI(startTime) {
-        this.currentPhase = "counting";
-        const countEl = document.getElementById('matching-count');
         this.playSE('match');
-
+        const countEl = document.getElementById('matching-count');
         let left = 5;
         const iv = setInterval(() => {
-            countEl.innerHTML = `<span style="font-size:2rem; color:var(--gold);">対戦開始まで ${left}...</span>`;
+            if (countEl) countEl.innerHTML = `<span style="font-size:1.8rem; color:var(--gold); font-weight:bold;">対戦開始まで ${left}...</span>`;
             left--;
-            if (left < 0) clearInterval(iv);
+            if (left < 0) {
+                clearInterval(iv);
+                if (this.isHost) {
+                    this.roomRef.child('gameStatus').set({
+                        phase: 'selection',
+                        round: 1,
+                        seed: Math.random()
+                    });
+                }
+            }
         }, 1000);
-    }
-
-    startGamePhase() {
-        this.currentPhase = "selection";
-        this.roomRef.child('gameStatus').set({
-            phase: 'selection',
-            round: 1,
-            seed: Math.random()
-        });
     }
 
     goToCharSelection() {
@@ -209,57 +196,52 @@ class GameController {
         this.renderCharOptions();
         if (this.bgm) this.bgm.play().catch(() => { });
 
-        const checkReady = (snapshot) => {
-            const data = snapshot.val();
-            if (!data) return;
-            const players = Object.values(data);
-            const allSelected = players.every(p => p.character);
-            if (allSelected) {
-                this.roomRef.child('players').off('value', checkReady);
+        // 全員の選択完了を監視
+        const unsubscribe = this.roomRef.child('players').on('value', (snap) => {
+            const players = Object.values(snap.val() || {});
+            if (players.every(p => p.character)) {
+                this.roomRef.child('players').off('value', unsubscribe);
                 if (this.isHost) {
-                    setTimeout(() => this.prepareNextRound(1), 1000);
+                    setTimeout(() => this.prepareRound(1), 1000);
                 }
             }
-        };
-        this.roomRef.child('players').on('value', checkReady);
+        });
     }
 
     renderCharOptions() {
         const container = document.getElementById('char-options');
+        if (!container) return;
         container.innerHTML = '';
-        const pool = [...CHARACTERS].sort(() => Math.random() - 0.5);
-        pool.slice(0, 2).forEach(char => {
+        const pool = [...CHARACTERS].sort(() => Math.random() - 0.5).slice(0, 2);
+        pool.forEach(char => {
             const card = document.createElement('div');
             card.className = 'card character selectable-char';
             card.innerHTML = `
                 <img src="${char.img}" style="width:100%; height:110px; object-fit:cover;">
-                <div class="info-box" style="padding:10px; color:#fff;">
-                    <div class="name" style="font-weight:bold; color:var(--gold);">${char.name}</div>
-                    <div class="selection-effect-text" style="font-size:0.75rem; color:#eee;">${char.effect}</div>
+                <div style="padding:10px; color:#fff;">
+                    <div style="font-weight:bold; color:var(--gold); margin-bottom:5px;">${char.name}</div>
+                    <div style="font-size:0.75rem; color:#ccc;">${char.effect}</div>
                 </div>
             `;
             card.onclick = () => {
                 this.playSE('select');
                 this.roomRef.child('players').child(this.myPlayerId).update({ character: char });
-                container.innerHTML = `<h2 class="glow-text">他のプレイヤーを待機中...</h2>`;
+                container.innerHTML = `<h2 class="glow-text">他の軍師を待っています...</h2>`;
             };
             container.appendChild(card);
         });
     }
 
-    prepareNextRound(round) {
+    prepareRound(round) {
         if (!this.isHost) return;
-
         this.deck = [];
         for (let i = 0; i < 15; i++) for (let v = 1; v <= 7; v++) this.deck.push(v);
         this.deck.sort(() => Math.random() - 0.5);
         const center = this.deck.splice(0, this.players.length);
 
+        // 状態リセット
         this.players.forEach(p => {
-            this.roomRef.child('players').child(p.id).update({
-                hasPlayed: false,
-                selectedValue: null
-            });
+            this.roomRef.child('players').child(p.id).update({ hasPlayed: false, selectedValue: null });
         });
 
         this.roomRef.child('gameStatus').update({
@@ -271,67 +253,64 @@ class GameController {
 
     startRound() {
         this.currentPhase = 'playing';
-        if (this.round > 10) { this.showResults(); return; }
-
+        if (this.round > 10) { this.finishGame(); return; }
         document.getElementById('current-round').textContent = this.round;
-        this.setupBoard();
+        this.updateBoard();
         this.renderField();
         this.renderHand();
         this.startTimer();
 
-        const checkResolution = (snapshot) => {
-            const data = snapshot.val();
-            if (!data) return;
-            const players = Object.values(data);
-            const allPlayed = players.every(p => p.hasPlayed);
-
-            if (allPlayed && this.currentPhase === 'playing') {
+        // ラウンド解決の監視
+        const resolveSub = this.roomRef.child('players').on('value', (snap) => {
+            const players = Object.values(snap.val() || {});
+            if (players.every(p => p.hasPlayed)) {
+                this.roomRef.child('players').off('value', resolveSub);
                 this.currentPhase = 'resolving';
-                this.roomRef.child('players').off('value', checkResolution);
-                setTimeout(() => this.resolveRoundSync(), 1000);
+                setTimeout(() => this.executeResolution(), 1000);
             }
-        };
-        this.roomRef.child('players').on('value', checkResolution);
+        });
 
-        if (this.isHost) {
-            this.simulateAIPlays();
-        }
+        if (this.isHost) this.handleBotsPlay();
     }
 
-    setupBoard() {
+    updateBoard() {
         const bar = document.getElementById('opponents-bar');
+        if (!bar) return;
         bar.innerHTML = '';
         this.players.forEach(p => {
             if (p.id !== this.myPlayerId) {
                 const el = document.createElement('div');
                 el.className = 'opponent-stat'; el.id = `player-stat-${p.id}`;
-                const invLen = p.inventory ? p.inventory.length : 0;
-                const handLen = p.hand ? p.hand.length : 10;
-                el.innerHTML = `<div class="avatar">${p.name[0]}</div><div class="status">獲得: ${invLen}枚</div><div class="status card-count">🃏 ${handLen}</div>`;
+                const invC = p.inventory ? p.inventory.length : 0;
+                const handC = p.hand ? p.hand.length : 10;
+                el.innerHTML = `<div class="avatar">${p.name[0]}</div><div>獲得: ${invC}枚</div><div class="card-count">🃏 ${handC}枚</div>`;
                 bar.appendChild(el);
             }
         });
-
         const me = this.players.find(p => p.id === this.myPlayerId);
         if (me && me.character) {
-            document.getElementById('my-character-card').innerHTML = `<div class="card character"><img src="${me.character.img}"><div class="info-box"><div class="name">${me.character.name}</div></div></div>`;
-            document.getElementById('panel-effect-text').textContent = me.character.effect;
+            const cp = document.getElementById('my-character-card');
+            if (cp) cp.innerHTML = `<div class="card character"><img src="${me.character.img}"><div class="info-box"><div class="name">${me.character.name}</div></div></div>`;
+            const et = document.getElementById('panel-effect-text');
+            if (et) et.textContent = me.character.effect;
         }
     }
 
     renderField() {
         const grid = document.getElementById('reward-slots');
+        if (!grid) return;
         grid.innerHTML = '';
-        this.centerCards.forEach((val, i) => {
-            const slot = document.createElement('div');
-            slot.className = 'reward-slot';
-            slot.innerHTML = `<div class="acquirer-name" id="acquirer-${i}">?</div><div class="card"><div class="number">${val}</div></div>`;
-            grid.appendChild(slot);
+        this.centerCards.forEach((v, i) => {
+            const s = document.createElement('div');
+            s.className = 'reward-slot';
+            s.innerHTML = `<div class="acquirer-name" id="acquirer-${i}">?</div><div class="card"><div class="number">${v}</div></div>`;
+            grid.appendChild(s);
         });
     }
 
     renderHand() {
         const container = document.getElementById('my-hand');
+        if (!container) return;
         container.innerHTML = '';
         const me = this.players.find(p => p.id === this.myPlayerId);
         if (!me || !me.hand) return;
@@ -340,7 +319,7 @@ class GameController {
             card.className = 'card';
             if (me.hasPlayed) card.classList.add('face-down');
             card.innerHTML = `<div class="number">${v}</div>`;
-            card.onclick = () => !me.hasPlayed && this.playCard(v);
+            card.onclick = () => !me.hasPlayed && this.submitCard(v);
             container.appendChild(card);
         });
     }
@@ -348,6 +327,7 @@ class GameController {
     startTimer() {
         this.timer = 60;
         const el = document.getElementById('timer-sec');
+        if (!el) return;
         el.textContent = this.timer;
         if (this.timerInterval) clearInterval(this.timerInterval);
         this.timerInterval = setInterval(() => {
@@ -355,133 +335,109 @@ class GameController {
             if (this.timer <= 0) {
                 clearInterval(this.timerInterval);
                 const me = this.players.find(p => p.id === this.myPlayerId);
-                if (me && !me.hasPlayed) this.autoPlay();
+                if (me && !me.hasPlayed) this.submitCard(me.hand[0]);
             }
         }, 1000);
     }
 
-    playCard(val) {
+    submitCard(val) {
         this.playSE('select');
         const me = this.players.find(p => p.id === this.myPlayerId);
-        const newHand = me.hand.filter(v => v !== val);
+        const nh = me.hand.filter(v => v !== val);
         this.roomRef.child('players').child(this.myPlayerId).update({
-            selectedValue: val,
-            hand: newHand,
-            hasPlayed: true
+            selectedValue: val, hand: nh, hasPlayed: true
         });
     }
 
-    autoPlay() {
-        const me = this.players.find(p => p.id === this.myPlayerId);
-        if (me && me.hand.length > 0) this.playCard(me.hand[0]);
-    }
-
-    simulateAIPlays() {
+    handleBotsPlay() {
         this.players.forEach(p => {
             if (!p.isHuman && !p.hasPlayed) {
                 setTimeout(() => {
                     if (this.currentPhase !== 'playing') return;
                     const val = p.hand[Math.floor(Math.random() * p.hand.length)];
-                    const newHand = p.hand.filter(v => v !== val);
+                    const nh = p.hand.filter(v => v !== val);
                     this.roomRef.child('players').child(p.id).update({
-                        selectedValue: val,
-                        hand: newHand,
-                        hasPlayed: true
+                        selectedValue: val, hand: nh, hasPlayed: true
                     });
-                }, 2000 + Math.random() * 5000);
+                }, 2000 + Math.random() * 3000);
             }
         });
     }
 
-    async resolveRoundSync() {
+    async executeResolution() {
         this.playSE('resolve');
-        const snapshot = await this.roomRef.child('players').once('value');
-        const playersMap = snapshot.val();
-        if (!playersMap) return;
-        const players = Object.values(playersMap);
-        const bids = players.map(p => ({ playerId: p.id, value: p.selectedValue }));
+        const snap = await this.roomRef.child('players').once('value');
+        const players = Object.values(snap.val() || {});
+        const bids = players.map(p => ({ pId: p.id, val: p.selectedValue }));
 
-        const sortedRewards = [...this.centerCards].sort((a, b) => b - a);
-        const valueCounts = {};
-        bids.forEach(b => { valueCounts[b.value] = (valueCounts[b.value] || 0) + 1; });
-        const validBids = bids.filter(b => valueCounts[b.value] === 1).sort((a, b) => b.value - a.value);
+        const rewards = [...this.centerCards].sort((a, b) => b - a);
+        const vCount = {};
+        bids.forEach(b => vCount[b.val] = (vCount[b.val] || 0) + 1);
+        const valid = bids.filter(b => vCount[b.val] === 1).sort((a, b) => b.val - a.val);
 
-        const animPromises = [];
-        validBids.forEach((bid, i) => {
-            if (i < sortedRewards.length) {
-                const player = players.find(p => p.id === bid.playerId);
-                const slotIdx = this.centerCards.indexOf(sortedRewards[i]);
-                animPromises.push(this.flyCard(slotIdx, player));
-
-                if (player.id === this.myPlayerId) {
-                    const inv = player.inventory || [];
-                    inv.push(sortedRewards[i]);
+        const anims = [];
+        valid.forEach((bid, i) => {
+            if (i < rewards.length) {
+                const p = players.find(x => x.id === bid.pId);
+                const sIdx = this.centerCards.indexOf(rewards[i]);
+                anims.push(this.animateFly(sIdx, p));
+                if (p.id === this.myPlayerId) {
+                    const inv = p.inventory || []; inv.push(rewards[i]);
                     this.roomRef.child('players').child(this.myPlayerId).update({ inventory: inv });
                 }
             }
         });
-
-        await Promise.all(animPromises);
-
-        if (this.isHost) {
-            setTimeout(() => this.prepareNextRound(this.round + 1), 2000);
-        }
+        await Promise.all(anims);
+        if (this.isHost) setTimeout(() => this.prepareRound(this.round + 1), 2000);
     }
 
-    flyCard(slotIdx, player) {
-        return new Promise(resolve => {
+    animateFly(sIdx, player) {
+        return new Promise(res => {
             const slots = document.querySelectorAll('.reward-slot');
-            const slot = slots[slotIdx];
-            if (!slot) return resolve();
-            const cardEl = slot.querySelector('.card');
-            const rect = cardEl.getBoundingClientRect();
-            const flyer = cardEl.cloneNode(true);
+            const slot = slots[sIdx];
+            if (!slot) return res();
+            const card = slot.querySelector('.card');
+            const rect = card.getBoundingClientRect();
+            const flyer = card.cloneNode(true);
             flyer.classList.add('animating-card');
-            flyer.style.left = rect.left + 'px'; flyer.style.top = rect.top + 'px';
-            flyer.style.width = rect.width + 'px'; flyer.style.height = rect.height + 'px';
+            flyer.style.cssText = `left:${rect.left}px; top:${rect.top}px; width:${rect.width}px; height:${rect.height}px;`;
             document.body.appendChild(flyer);
-            cardEl.style.visibility = 'hidden';
-            document.getElementById(`acquirer-${slotIdx}`).textContent = player.name;
-
-            let targetEl = document.getElementById(`player-stat-${player.id}`);
-            if (player.id === this.myPlayerId) targetEl = document.getElementById('my-inventory-count');
-
-            if (!targetEl) { flyer.remove(); return resolve(); }
-            const targetRect = targetEl.getBoundingClientRect();
-
+            card.style.visibility = 'hidden';
+            document.getElementById(`acquirer-${sIdx}`).textContent = player.name;
+            const target = (player.id === this.myPlayerId) ? document.getElementById('my-inventory-count') : document.getElementById(`player-stat-${player.id}`);
+            if (!target) { flyer.remove(); return res(); }
+            const tRect = target.getBoundingClientRect();
             setTimeout(() => {
-                flyer.style.left = (targetRect.left + targetRect.width / 2 - 20) + 'px';
-                flyer.style.top = (targetRect.top + targetRect.height / 2 - 20) + 'px';
+                flyer.style.left = (tRect.left + tRect.width / 2 - 20) + 'px';
+                flyer.style.top = (tRect.top + tRect.height / 2 - 20) + 'px';
                 flyer.style.transform = 'scale(0.2)'; flyer.style.opacity = '0';
             }, 50);
-            setTimeout(() => { flyer.remove(); resolve(); }, 850);
+            setTimeout(() => { flyer.remove(); res(); }, 850);
         });
     }
 
-    showResults() {
+    finishGame() {
         this.switchTo('result-screen');
         const container = document.getElementById('final-results');
+        if (!container) return;
         container.innerHTML = '';
-        const results = this.players.map(p => {
-            const res = calculateFinalScore(p.inventory || [], p.character, this.players);
-            return { ...p, score: res.score, isSpecial: res.isSpecialWin };
+        const resList = this.players.map(p => {
+            const sObj = calculateFinalScore(p.inventory || [], p.character, this.players);
+            return { ...p, score: sObj.score, sp: sObj.isSpecialWin };
         });
-        results.sort((a, b) => (b.isSpecial ? Infinity : b.score) - (a.isSpecial ? Infinity : a.score));
-
-        results.forEach(res => {
+        resList.sort((a, b) => (b.sp ? 999 : b.score) - (a.sp ? 999 : a.score));
+        resList.forEach(r => {
             const row = document.createElement('div');
-            row.className = `result-row ${res.id === results[0].id ? 'winner' : ''}`;
-            const sText = res.isSpecial ? "特 殊 勝 利" : `${res.score}点`;
-            row.innerHTML = `<div class="char-thumb"><img src="${res.character.img}" width="50" height="70"></div><div style="padding:0 20px; text-align:left"><strong>${res.name}</strong><br><small>${res.character.effect}</small></div><div class="score">${sText}</div>`;
+            row.className = `result-row ${r.id === resList[0].id ? 'winner' : ''}`;
+            const sText = r.sp ? "【特殊勝利】" : `${r.score}点`;
+            row.innerHTML = `<div class="char-thumb"><img src="${r.character.img}" width="50"></div><div style="flex:1; padding-left:15px; text-align:left;"><strong>${r.name}</strong><br><small>${r.character.effect}</small></div><div class="score">${sText}</div>`;
             container.appendChild(row);
         });
     }
 
-    switchTo(screenId) {
+    switchTo(id) {
         document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-        document.getElementById(screenId).classList.add('active');
+        const target = document.getElementById(id); if (target) target.classList.add('active');
     }
 }
-
-const game = new GameController();
-window.game = game;
+const game = new GameController(); window.game = game;
