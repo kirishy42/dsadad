@@ -1,5 +1,5 @@
 /**
- * 戦略カードゲーム - リアルタイム通信版 (Firebase 安定化Ver 2.0)
+ * 戦略カードゲーム - リアルタイム通信版 (Firebase 強制開始ボタン対応版)
  */
 
 class GameController {
@@ -9,16 +9,17 @@ class GameController {
         this.roomId = "lobby";
         this.roomRef = null;
         this.isHost = false;
+        this.gameStarted = false;
 
         this.round = 1;
         this.centerCards = [];
         this.deck = [];
         this.timer = 60;
         this.timerInterval = null;
-        this.currentPhase = ""; // 内部フェーズ
+        this.currentPhase = "";
+
         this.audioCtx = null;
         this.bgm = document.getElementById('bgm');
-
         if (this.bgm) this.bgm.volume = 0.15;
     }
 
@@ -50,7 +51,7 @@ class GameController {
         const password = pIn ? pIn.value : "";
         if (!username) { alert("名乗る名を入力してください。"); return; }
         if (password !== "456123") { alert("合言葉が違うようです。"); return; }
-        if (!window.database) { alert("通信の準備ができていません。設定を確認してください。"); return; }
+        if (!window.database) { alert("通信の準備ができていません。Firebaseの設定を確認してください。"); return; }
 
         this.myPlayerId = "p_" + Date.now() + "_" + Math.floor(Math.random() * 10000);
         this.roomId = "room_" + password;
@@ -77,6 +78,13 @@ class GameController {
         this.roomRef.child('players').child(this.myPlayerId).set(myData);
         this.roomRef.child('players').child(this.myPlayerId).onDisconnect().remove();
 
+        // ルーム全体をクリア（ホストが最初に入った時のみ、古いゴミデータを削除）
+        this.roomRef.child('players').once('value', (snap) => {
+            if (!snap.val() || Object.keys(snap.val()).length <= 1) {
+                this.roomRef.child('gameStatus').remove();
+            }
+        });
+
         // プレイヤー監視
         this.roomRef.child('players').on('value', (snap) => {
             const data = snap.val();
@@ -84,14 +92,14 @@ class GameController {
             const plist = Object.values(data).sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
             this.players = plist;
 
-            // ホスト判定（リストの最初が自分ならホスト）
-            const wasHost = this.isHost;
             this.isHost = (this.players[0].id === this.myPlayerId);
-
-            if (this.isHost && !wasHost) console.log("You are now the HOST.");
-
             this.updateMatchingUI();
-            this.checkAutoStart();
+
+            if (this.isHost && this.currentPhase === "") {
+                const hostControls = document.getElementById('host-controls');
+                if (hostControls) hostControls.style.display = 'block';
+                this.checkAutoStart();
+            }
         });
 
         // 進行管理監視
@@ -99,10 +107,8 @@ class GameController {
             const status = snap.val();
             if (!status) return;
 
-            console.log("Status Sync:", status.phase);
-
             if (status.phase === 'counting' && this.currentPhase !== 'counting') {
-                this.handleCounting(status.serverTime || Date.now());
+                this.handleCounting();
             } else if (status.phase === 'selection' && this.currentPhase !== 'selection') {
                 this.goToCharSelection();
             } else if (status.phase === 'playing' && (this.currentPhase !== 'playing' || this.round !== status.round)) {
@@ -125,35 +131,29 @@ class GameController {
         });
 
         const countEl = document.getElementById('matching-count');
-        if (this.currentPhase === 'counting') {
-            // カウントダウン表示は別で行う
-        } else {
+        if (this.currentPhase !== 'counting') {
             countEl.textContent = `現在 ${this.players.length} 名待機中... (3名以上で自動開始)`;
         }
     }
 
     checkAutoStart() {
         if (!this.isHost || this.currentPhase !== "") return;
-
         if (this.players.length >= 3) {
-            this.roomRef.child('gameStatus').set({
-                phase: 'counting',
-                serverTime: firebase.database.ServerValue.TIMESTAMP
-            });
-        } else {
-            if (!this.matchingTimer) {
-                this.matchingTimer = setTimeout(() => {
-                    if (this.isHost && this.players.length < 3 && this.currentPhase === "") {
-                        this.fillBots();
-                    }
-                }, 10000); // 10秒待機
-            }
+            this.startCountingPhase();
         }
     }
 
-    fillBots() {
-        const botNames = ["信長", "秀吉", "家康", "謙信", "信玄"];
-        while (this.players.length < 3) {
+    forceStartWithAI() {
+        if (!this.isHost || this.currentPhase !== "") return;
+        this.playSE('select');
+        this.fillBotsSync();
+        setTimeout(() => this.startCountingPhase(), 500);
+    }
+
+    fillBotsSync() {
+        const botNames = ["信長", "秀吉", "家康", "謙信", "信玄", "幸村", "政宗"];
+        let currentCount = this.players.length;
+        while (currentCount < 3) {
             const bId = "bot_" + Math.random().toString(36).substr(2, 9);
             const bName = botNames.splice(Math.floor(Math.random() * botNames.length), 1)[0] + "(AI)";
             const bData = {
@@ -163,19 +163,31 @@ class GameController {
                 hand: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
                 inventory: [],
                 character: CHARACTERS[Math.floor(Math.random() * CHARACTERS.length)],
-                joinedAt: Date.now() + this.players.length
+                joinedAt: Date.now() + currentCount
             };
             this.roomRef.child('players').child(bId).set(bData);
+            currentCount++;
         }
     }
 
-    handleCounting(startTime) {
+    startCountingPhase() {
+        if (this.currentPhase !== "") return;
+        this.roomRef.child('gameStatus').set({
+            phase: 'counting',
+            serverTime: firebase.database.ServerValue.TIMESTAMP
+        });
+    }
+
+    handleCounting() {
         this.currentPhase = "counting";
         this.playSE('match');
         const countEl = document.getElementById('matching-count');
+        const hostControls = document.getElementById('host-controls');
+        if (hostControls) hostControls.style.display = 'none';
+
         let left = 5;
         const iv = setInterval(() => {
-            if (countEl) countEl.innerHTML = `<span style="font-size:1.8rem; color:var(--gold); font-weight:bold;">対戦開始まで ${left}...</span>`;
+            if (countEl) countEl.innerHTML = `<span style="font-size:1.8rem; color:var(--gold); font-weight:bold;">軍議開始まで ${left}...</span>`;
             left--;
             if (left < 0) {
                 clearInterval(iv);
@@ -199,7 +211,7 @@ class GameController {
         // 全員の選択完了を監視
         const unsubscribe = this.roomRef.child('players').on('value', (snap) => {
             const players = Object.values(snap.val() || {});
-            if (players.every(p => p.character)) {
+            if (players.length >= 3 && players.every(p => p.character)) {
                 this.roomRef.child('players').off('value', unsubscribe);
                 if (this.isHost) {
                     setTimeout(() => this.prepareRound(1), 1000);
@@ -226,7 +238,7 @@ class GameController {
             card.onclick = () => {
                 this.playSE('select');
                 this.roomRef.child('players').child(this.myPlayerId).update({ character: char });
-                container.innerHTML = `<h2 class="glow-text">他の軍師を待っています...</h2>`;
+                container.innerHTML = `<div class="glass-panel"><h2 class="glow-text">他の軍師を待っています...</h2></div>`;
             };
             container.appendChild(card);
         });
@@ -239,7 +251,6 @@ class GameController {
         this.deck.sort(() => Math.random() - 0.5);
         const center = this.deck.splice(0, this.players.length);
 
-        // 状態リセット
         this.players.forEach(p => {
             this.roomRef.child('players').child(p.id).update({ hasPlayed: false, selectedValue: null });
         });
@@ -260,7 +271,6 @@ class GameController {
         this.renderHand();
         this.startTimer();
 
-        // ラウンド解決の監視
         const resolveSub = this.roomRef.child('players').on('value', (snap) => {
             const players = Object.values(snap.val() || {});
             if (players.every(p => p.hasPlayed)) {
