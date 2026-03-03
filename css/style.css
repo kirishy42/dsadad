@@ -420,8 +420,35 @@ body {
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
+
 .result-row.winner {
     background: rgba(255, 204, 0, 0.15);
     border: 1px solid var(--gold);
     border-radius: 12px;
+}
+
+/* 音量調整 */
+.volume-control {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: rgba(0, 0, 0, 0.7);
+    padding: 8px 15px;
+    border-radius: 30px;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    z-index: 10000;
+}
+
+.volume-control .icon {
+    font-size: 1.2rem;
+}
+
+.volume-control input[type="range"] {
+    width: 80px;
+    cursor: pointer;
+    accent-color: var(--accent);
 }

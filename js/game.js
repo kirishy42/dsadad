@@ -18,8 +18,31 @@ class GameController {
         this.currentPhase = ""; // ローカルの管理フェーズ
         this.gameStatus = null; // Firebase上のstatus
 
+        this.bgm = null;
+        this.audioInitialized = false;
+    }
+
+    initAudio() {
+        if (this.audioInitialized) return;
         this.bgm = document.getElementById('bgm');
-        if (this.bgm) this.bgm.volume = 0.15;
+        this.loadVolume();
+        this.audioInitialized = true;
+    }
+
+    loadVolume() {
+        const saved = localStorage.getItem('game_volume');
+        const vol = (saved !== null) ? parseFloat(saved) : 0.15;
+        if (this.bgm) {
+            this.bgm.volume = vol;
+        }
+        const slider = document.getElementById('volume-slider');
+        if (slider) slider.value = vol;
+    }
+
+    setVolume(val) {
+        const vol = parseFloat(val);
+        if (this.bgm) this.bgm.volume = vol;
+        localStorage.setItem('game_volume', vol);
     }
 
     log(msg) {
@@ -56,15 +79,13 @@ class GameController {
 
     tryLogin() {
         const uIn = document.getElementById('username-input');
-        const pIn = document.getElementById('password-input');
         const username = uIn ? uIn.value.trim() : "";
-        const password = pIn ? pIn.value : "";
         if (!username) { alert("名乗る名を入力してください。"); return; }
-        if (password !== "456123") { alert("合言葉が違うようです。"); return; }
-        if (!window.database) { alert("Firebaseが初期化されていません。"); return; }
+        if (!window.database) { alert("Firebaseが初期化されていません。再読み込みしてください。"); return; }
 
+        this.initAudio(); // ログイン時にオーディオ初期化
         this.myPlayerId = "p_" + Date.now() + "_" + Math.floor(Math.random() * 10000);
-        this.roomId = "room_" + password;
+        this.roomId = "room_official"; // 固定ルームID（パスワード廃止）
         this.roomRef = window.database.ref('rooms/' + this.roomId);
         this.log(`Login: ${username} (Room: ${this.roomId})`);
         this.joinRoom(username);
@@ -89,7 +110,6 @@ class GameController {
         this.roomRef.child('players').child(this.myPlayerId).set(myData);
         this.roomRef.child('players').child(this.myPlayerId).onDisconnect().remove();
 
-        // 最初の一人ならステータスをリセット
         this.roomRef.child('players').once('value', (snap) => {
             const val = snap.val();
             if (!val || Object.keys(val).length <= 1) {
@@ -98,59 +118,72 @@ class GameController {
             }
         });
 
-        // 【集中管理】プレイヤー情報の変更監視を一つに統合
         this.roomRef.child('players').on('value', (snap) => {
             const data = snap.val();
             if (!data) return;
             const plist = Object.values(data).sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
             this.players = plist;
-            this.isHost = (this.players[0].id === this.myPlayerId);
+
+            const oldHost = this.isHost;
+            this.isHost = (this.players.length > 0 && this.players[0].id === this.myPlayerId);
+            if (oldHost !== this.isHost) this.log(`Host status changed: ${this.isHost}`);
 
             this.handlePlayerUpdates();
         });
 
-        // 進行管理の監視
         this.roomRef.child('gameStatus').on('value', (snap) => {
             const status = snap.val();
             if (!status) return;
             this.gameStatus = status;
-            this.log(`State Sync: ${status.phase}`);
+            this.log(`Sync Phase: ${status.phase} (Local: ${this.currentPhase})`);
 
-            if (status.phase === 'counting' && this.currentPhase !== 'counting') {
-                this.executeCounting();
-            } else if (status.phase === 'selection' && this.currentPhase !== 'selection') {
-                this.executeSelection();
-            } else if (status.phase === 'playing' && (this.currentPhase !== 'playing' || this.round !== status.round)) {
-                this.round = status.round;
-                this.centerCards = status.centerCards || [];
-                this.executePlaying();
+            if (status.phase === 'waiting') {
+                if (this.currentPhase !== "waiting") {
+                    this.currentPhase = "waiting";
+                    this.switchTo('matching-screen');
+                }
+            } else if (status.phase === 'counting') {
+                if (this.currentPhase !== 'counting') {
+                    this.executeCounting();
+                }
+            } else if (status.phase === 'selection') {
+                if (this.currentPhase !== 'selection') {
+                    this.executeSelection();
+                }
+            } else if (status.phase === 'playing') {
+                if (this.currentPhase !== 'playing' || this.round !== status.round) {
+                    this.round = status.round;
+                    this.centerCards = status.centerCards || [];
+                    this.executePlaying();
+                }
             }
         });
     }
 
-    // プレイヤーの変更があった時に、現在のフェーズに合わせて完了判定を行う
     handlePlayerUpdates() {
-        if (this.currentPhase === "") {
+        if (this.currentPhase === "" || this.currentPhase === "waiting") {
             this.updateMatchingUI();
             if (this.isHost && this.players.length >= 3) {
                 this.log("Match satisfied. Starting countdown phase...");
                 this.startCountingState();
             }
         } else if (this.currentPhase === "selection") {
-            this.log("Checking if all chose characters...");
-            if (this.players.every(p => p.character)) {
-                this.log("All characters selected.");
+            const allSelected = this.players.length >= 3 && this.players.every(p => p.character);
+            if (allSelected && this.currentPhase !== "transitioning") {
+                this.log("All characters selected. Moving to playing phase...");
+                this.currentPhase = "transitioning";
                 if (this.isHost) {
-                    this.log("Host triggering next round...");
                     setTimeout(() => this.prepareNextRound(1), 1000);
                 }
             }
         } else if (this.currentPhase === "playing") {
             this.updateOpponentsUI();
-            if (this.players.every(p => p.hasPlayed)) {
+            if (this.players.length > 0 && this.players.every(p => p.hasPlayed)) {
                 this.log("All cards played. Resolving round...");
                 this.currentPhase = "resolving";
-                setTimeout(() => this.processResolution(), 1000);
+                if (this.isHost) {
+                    setTimeout(() => this.processResolution(), 1000);
+                }
             }
         }
     }
@@ -170,10 +203,10 @@ class GameController {
         const hostBtn = document.getElementById('host-controls');
         if (this.isHost) {
             if (hostBtn) hostBtn.style.display = 'block';
-            countEl.textContent = `現在 ${this.players.length} 名待機中... あなたが軍記（ホスト）です。`;
+            if (countEl) countEl.textContent = `現在 ${this.players.length} 名待機中... あなたが軍記（ホスト）です。`;
         } else {
             if (hostBtn) hostBtn.style.display = 'none';
-            countEl.textContent = `現在 ${this.players.length} 名待機中... 開始を待っています。`;
+            if (countEl) countEl.textContent = `現在 ${this.players.length} 名待機中... 開始を待っています。`;
         }
     }
 
@@ -186,19 +219,21 @@ class GameController {
                     else el.classList.remove('has-played');
                     const inv = p.inventory ? p.inventory.length : 0;
                     const hand = p.hand ? p.hand.length : 10;
-                    el.querySelector('.card-count').textContent = `🃏 ${hand}枚`;
+                    const cc = el.querySelector('.card-count');
+                    if (cc) cc.textContent = `🃏 ${hand}枚`;
                 }
             }
         });
     }
 
     startCountingState() {
-        if (this.currentPhase !== "") return;
+        if (this.currentPhase === "counting" || this.currentPhase === "transitioning") return;
+        this.currentPhase = "counting";
         this.roomRef.child('gameStatus').set({ phase: 'counting' });
     }
 
     forceStartWithAI() {
-        if (!this.isHost || this.currentPhase !== "") return;
+        if (!this.isHost || (this.currentPhase !== "" && this.currentPhase !== "waiting")) return;
         this.log("Force Start with AI initiated.");
         this.playSE('select');
         this.addBots();
@@ -215,7 +250,8 @@ class GameController {
                 id: id, name: name, isHuman: false,
                 hand: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], inventory: [],
                 character: CHARACTERS[Math.floor(Math.random() * CHARACTERS.length)],
-                joinedAt: Date.now() + count
+                joinedAt: Date.now() + count,
+                hasPlayed: false, selectedValue: null
             };
             this.roomRef.child('players').child(id).set(bot);
             count++;
@@ -224,18 +260,32 @@ class GameController {
 
     executeCounting() {
         this.currentPhase = "counting";
+        this.log("Phase -> Counting");
         this.playSE('match');
         const countEl = document.getElementById('matching-count');
         const hostBtn = document.getElementById('host-controls');
         if (hostBtn) hostBtn.style.display = 'none';
+
         let sec = 5;
-        const iv = setInterval(() => {
+        if (this.timerInterval) clearInterval(this.timerInterval);
+
+        this.timerInterval = setInterval(() => {
             if (countEl) countEl.innerHTML = `<span style="font-size:1.8rem; color:var(--gold); font-weight:bold;">軍議開始まで ${sec}...</span>`;
-            sec--;
-            if (sec < 0) {
-                clearInterval(iv);
-                if (this.isHost) this.roomRef.child('gameStatus').set({ phase: 'selection', round: 1 });
+
+            if (sec <= 0) {
+                clearInterval(this.timerInterval);
+                this.timerInterval = null;
+                this.log("Countdown reached zero.");
+                if (this.isHost) {
+                    this.log("Host triggering selection phase...");
+                    this.roomRef.child('gameStatus').update({
+                        phase: 'selection',
+                        round: 1,
+                        timestamp: firebase.database.ServerValue.TIMESTAMP
+                    });
+                }
             }
+            sec--;
         }, 1000);
     }
 
@@ -243,7 +293,9 @@ class GameController {
         this.currentPhase = "selection";
         this.switchTo('char-selection-screen');
         this.renderSelectionCards();
-        if (this.bgm) this.bgm.play().catch(() => { });
+        if (this.bgm && this.bgm.paused) {
+            this.bgm.play().catch(e => { console.warn("BGM Play failed:", e) });
+        }
     }
 
     renderSelectionCards() {
@@ -277,19 +329,22 @@ class GameController {
         this.deck.sort(() => Math.random() - 0.5);
         const center = this.deck.splice(0, this.players.length);
 
+        const updates = {};
         this.players.forEach(p => {
-            this.roomRef.child('players').child(p.id).update({ hasPlayed: false, selectedValue: null });
+            updates[`players/${p.id}/hasPlayed`] = false;
+            updates[`players/${p.id}/selectedValue`] = null;
         });
+        updates['gameStatus'] = { phase: 'playing', round: r, centerCards: center };
 
-        this.roomRef.child('gameStatus').update({
-            phase: 'playing', round: r, centerCards: center
-        });
+        this.roomRef.update(updates);
     }
 
     executePlaying() {
         this.currentPhase = "playing";
+        this.switchTo('main-game-screen');
         if (this.round > 10) { this.showFinalResults(); return; }
-        document.getElementById('current-round').textContent = this.round;
+        const rd = document.getElementById('current-round');
+        if (rd) rd.textContent = this.round;
         this.setupGameUI();
         this.renderGameField();
         this.renderMyHand();
@@ -356,7 +411,7 @@ class GameController {
             if (this.timer <= 0) {
                 clearInterval(this.timerInterval);
                 const me = this.players.find(p => p.id === this.myPlayerId);
-                if (me && !me.hasPlayed) this.handleCardSubmission(me.hand[0]);
+                if (me && !me.hasPlayed && me.hand && me.hand.length > 0) this.handleCardSubmission(me.hand[0]);
             }
         }, 1000);
     }
@@ -364,9 +419,21 @@ class GameController {
     handleCardSubmission(val) {
         this.playSE('select');
         const me = this.players.find(p => p.id === this.myPlayerId);
+        if (!me) return;
         const nh = me.hand.filter(v => v !== val);
         this.roomRef.child('players').child(this.myPlayerId).update({
             selectedValue: val, hand: nh, hasPlayed: true
+        }).then(() => {
+            this.log(`Submitted: ${val}`);
+            // Firebaseが更新された後にUIを再描画し、確実にプレイヤーの状態を同期
+            this.roomRef.child('players').child(this.myPlayerId).once('value', (s) => {
+                const updatedMe = s.val();
+                if (updatedMe) {
+                    const idx = this.players.findIndex(p => p.id === this.myPlayerId);
+                    if (idx !== -1) this.players[idx] = updatedMe;
+                    this.renderMyHand();
+                }
+            });
         });
     }
 
@@ -423,7 +490,8 @@ class GameController {
             flyer.style.cssText = `left:${rect.left}px; top:${rect.top}px; width:${rect.width}px; height:${rect.height}px;`;
             document.body.appendChild(flyer);
             card.style.visibility = 'hidden';
-            document.getElementById(`acquirer-${sIdx}`).textContent = player.name;
+            const acq = document.getElementById(`acquirer-${sIdx}`);
+            if (acq) acq.textContent = player.name;
             const target = (player.id === this.myPlayerId) ? document.getElementById('my-inventory-count') : document.getElementById(`player-stat-${player.id}`);
             if (!target) { flyer.remove(); return res(); }
             const tRect = target.getBoundingClientRect();
@@ -460,3 +528,4 @@ class GameController {
     }
 }
 const game = new GameController(); window.game = game;
+

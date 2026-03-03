@@ -25,10 +25,6 @@
                         <label>ユーザー名</label>
                         <input type="text" id="username-input" placeholder="名乗る名を入力せよ" maxlength="10">
                     </div>
-                    <div class="input-group">
-                        <label>合言葉</label>
-                        <input type="password" id="password-input" placeholder="456123">
-                    </div>
                 </div>
                 <div class="button-group">
                     <button class="premium-btn" onclick="game.tryLogin()">マッチング開始</button>
@@ -136,11 +132,17 @@
     <!-- オーディオ要素 -->
     <audio id="bgm" src="bin/BGM.mp3" loop></audio>
 
+    <!-- 音量調整 (Floating) -->
+    <div class="volume-control">
+        <span class="icon">🔊</span>
+        <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="0.15"
+            oninput="game.setVolume(this.value)">
+    </div>
+
     <!-- Firebase SDK (Compat) -->
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
 
-    <script src="js/logic.js"></script>
     <script>
         // ユーザーから提供された設定
         const firebaseConfig = {
@@ -163,6 +165,8 @@
             alert("Firebaseの初期化に失敗しました。設定を確認してください。\n" + e.message);
         }
     </script>
+
+    <script src="js/logic.js"></script>
     <script src="js/game.js"></script>
 </body>
 
