@@ -1,25 +1,35 @@
 /**
- * 戦略カードゲーム - リアルタイム通信版 (Firebase 集中同期Ver v2.1)
+ * 戦略カードゲーム - リアルタイム通信版 (v4.1 報酬同期改善Ver)
+ * 1. ホストによる一括報酬配布 (アトミック更新)
+ * 2. インベントリ表示の強制同期
  */
 
 class GameController {
     constructor() {
         this.players = [];
         this.myPlayerId = null;
-        this.roomId = "lobby";
         this.roomRef = null;
         this.isHost = false;
 
         this.round = 1;
         this.centerCards = [];
-        this.deck = [];
         this.timer = 60;
-        this.timerInterval = null;
-        this.currentPhase = ""; // ローカルの管理フェーズ
-        this.gameStatus = null; // Firebase上のstatus
+
+        this.syncTimer = null;
+        this.gameTimer = null;
+
+        this.currentPhase = "";
+        this.gameStatus = null;
 
         this.bgm = null;
         this.audioInitialized = false;
+
+        this.log("Game system initialized. v4.1 stable.");
+    }
+
+    stopAllTimers() {
+        if (this.syncTimer) { clearInterval(this.syncTimer); this.syncTimer = null; }
+        if (this.gameTimer) { clearInterval(this.gameTimer); this.gameTimer = null; }
     }
 
     initAudio() {
@@ -32,9 +42,7 @@ class GameController {
     loadVolume() {
         const saved = localStorage.getItem('game_volume');
         const vol = (saved !== null) ? parseFloat(saved) : 0.15;
-        if (this.bgm) {
-            this.bgm.volume = vol;
-        }
+        if (this.bgm) this.bgm.volume = vol;
         const slider = document.getElementById('volume-slider');
         if (slider) slider.value = vol;
     }
@@ -46,7 +54,7 @@ class GameController {
     }
 
     log(msg) {
-        console.log("[GAME]", msg);
+        console.log("[SYSTEM]", msg);
         const logEl = document.getElementById('debug-log');
         if (logEl) {
             const div = document.createElement('div');
@@ -77,113 +85,141 @@ class GameController {
         } catch (e) { }
     }
 
+    async resetRoom() {
+        if (!confirm("ルームを強制リセットしますか？進行中のゲームは破棄されます。")) return;
+        if (!window.database) return;
+        this.log("Emergency Reset Triggered.");
+        await window.database.ref('rooms/room_official').remove();
+        alert("ルームを清掃しました。マッチングを開始してください。");
+        location.reload();
+    }
+
     tryLogin() {
         const uIn = document.getElementById('username-input');
         const username = uIn ? uIn.value.trim() : "";
         if (!username) { alert("名乗る名を入力してください。"); return; }
-        if (!window.database) { alert("Firebaseが初期化されていません。再読み込みしてください。"); return; }
+        if (!window.database) { alert("DB接続エラー。"); return; }
 
-        this.initAudio(); // ログイン時にオーディオ初期化
-        this.myPlayerId = "p_" + Date.now() + "_" + Math.floor(Math.random() * 10000);
-        this.roomId = "room_official"; // 固定ルームID（パスワード廃止）
-        this.roomRef = window.database.ref('rooms/' + this.roomId);
-        this.log(`Login: ${username} (Room: ${this.roomId})`);
+        this.initAudio();
+        this.myPlayerId = "p_" + Date.now();
+        this.roomRef = window.database.ref('rooms/room_official');
         this.joinRoom(username);
     }
 
-    joinRoom(username) {
+    async joinRoom(username) {
         this.playSE('select');
         this.switchTo('matching-screen');
 
+        const playersSnap = await this.roomRef.child('players').once('value');
+        if (!playersSnap.exists()) {
+            await this.roomRef.child('gameStatus').set({ phase: "waiting" });
+        }
+
         const myData = {
-            id: this.myPlayerId,
-            name: username,
-            isHuman: true,
-            hand: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            inventory: [],
-            character: null,
-            selectedValue: null,
-            hasPlayed: false,
+            id: this.myPlayerId, name: username, isHuman: true,
+            hand: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], inventory: [],
+            character: null, selectedValue: null, hasPlayed: false,
             joinedAt: firebase.database.ServerValue.TIMESTAMP
         };
 
-        this.roomRef.child('players').child(this.myPlayerId).set(myData);
+        await this.roomRef.child('players').child(this.myPlayerId).set(myData);
         this.roomRef.child('players').child(this.myPlayerId).onDisconnect().remove();
 
-        this.roomRef.child('players').once('value', (snap) => {
-            const val = snap.val();
-            if (!val || Object.keys(val).length <= 1) {
-                this.log("First player. Cleaning up room status...");
-                this.roomRef.child('gameStatus').set({ phase: "waiting" });
-            }
-        });
+        this.roomRef.on('value', (snap) => {
+            const root = snap.val();
+            if (!root) return;
 
-        this.roomRef.child('players').on('value', (snap) => {
-            const data = snap.val();
-            if (!data) return;
-            const plist = Object.values(data).sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
-            this.players = plist;
+            const playersData = root.players || {};
+            let hasStaleData = false;
+            Object.keys(playersData).forEach(pid => {
+                const p = playersData[pid];
+                if (!p.isHuman || p.isBot) {
+                    this.roomRef.child('players').child(pid).remove();
+                    hasStaleData = true;
+                }
+            });
+            if (hasStaleData) return;
 
-            const oldHost = this.isHost;
+            this.players = Object.values(playersData).sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
             this.isHost = (this.players.length > 0 && this.players[0].id === this.myPlayerId);
-            if (oldHost !== this.isHost) this.log(`Host status changed: ${this.isHost}`);
 
-            this.handlePlayerUpdates();
-        });
-
-        this.roomRef.child('gameStatus').on('value', (snap) => {
-            const status = snap.val();
-            if (!status) return;
+            const status = root.gameStatus || { phase: "waiting" };
             this.gameStatus = status;
-            this.log(`Sync Phase: ${status.phase} (Local: ${this.currentPhase})`);
-
-            if (status.phase === 'waiting') {
-                if (this.currentPhase !== "waiting") {
-                    this.currentPhase = "waiting";
-                    this.switchTo('matching-screen');
-                }
-            } else if (status.phase === 'counting') {
-                if (this.currentPhase !== 'counting') {
-                    this.executeCounting();
-                }
-            } else if (status.phase === 'selection') {
-                if (this.currentPhase !== 'selection') {
-                    this.executeSelection();
-                }
-            } else if (status.phase === 'playing') {
-                if (this.currentPhase !== 'playing' || this.round !== status.round) {
-                    this.round = status.round;
-                    this.centerCards = status.centerCards || [];
-                    this.executePlaying();
-                }
-            }
+            this.syncUI(status);
         });
     }
 
-    handlePlayerUpdates() {
-        if (this.currentPhase === "" || this.currentPhase === "waiting") {
+    syncUI(status) {
+        const phase = status.phase;
+
+        if (phase === 'waiting') {
+            if (this.currentPhase !== 'waiting') {
+                this.currentPhase = 'waiting';
+                this.stopAllTimers();
+                this.switchTo('matching-screen');
+            }
             this.updateMatchingUI();
-            if (this.isHost && this.players.length >= 3) {
-                this.log("Match satisfied. Starting countdown phase...");
-                this.startCountingState();
+        }
+        else if (phase === 'counting') {
+            if (this.currentPhase !== 'counting') {
+                this.currentPhase = 'counting';
+                this.executeCounting();
             }
-        } else if (this.currentPhase === "selection") {
-            const allSelected = this.players.length >= 3 && this.players.every(p => p.character);
-            if (allSelected && this.currentPhase !== "transitioning") {
-                this.log("All characters selected. Moving to playing phase...");
-                this.currentPhase = "transitioning";
-                if (this.isHost) {
-                    setTimeout(() => this.prepareNextRound(1), 1000);
-                }
+        }
+        else if (phase === 'selection') {
+            if (this.currentPhase !== 'selection') {
+                this.currentPhase = 'selection';
+                this.executeSelection();
             }
-        } else if (this.currentPhase === "playing") {
-            this.updateOpponentsUI();
-            if (this.players.length > 0 && this.players.every(p => p.hasPlayed)) {
-                this.log("All cards played. Resolving round...");
-                this.currentPhase = "resolving";
-                if (this.isHost) {
+            const allPicked = this.players.every(p => p.character);
+            if (allPicked && this.isHost) {
+                this.roomRef.child('gameStatus').transaction(cur => {
+                    if (cur && cur.phase === 'selection') return { phase: 'transitioning' };
+                }, (err, commit) => {
+                    if (commit) this.prepareNextRound(1);
+                });
+            }
+        }
+        else if (phase === 'playing') {
+            if (this.currentPhase !== 'playing' || this.round !== status.round) {
+                this.currentPhase = 'playing';
+                this.round = status.round;
+                this.centerCards = status.centerCards || [];
+                this.executePlaying();
+            } else {
+                this.updateOpponentsUI();
+                this.renderMyHand();
+                this.updateInventoryCount(); // インベントリ表示を更新
+                if (this.isHost && this.players.every(p => p.hasPlayed)) {
+                    this.roomRef.child('gameStatus/phase').set('resolving');
                     setTimeout(() => this.processResolution(), 1000);
                 }
+            }
+        }
+        else if (phase === 'resolving') {
+            if (this.currentPhase !== 'resolving') {
+                this.currentPhase = 'resolving';
+                this.updateInventoryCount();
+                this.runResolutionUI();
+            }
+        }
+    }
+
+    updateInventoryCount() {
+        const me = this.players.find(p => p.id === this.myPlayerId);
+        if (me) {
+            const countEl = document.getElementById('my-inventory-count');
+            if (countEl) countEl.textContent = (me.inventory || []).length;
+
+            const listEl = document.getElementById('my-inventory-list');
+            if (listEl) {
+                listEl.innerHTML = '';
+                (me.inventory || []).forEach(val => {
+                    const card = document.createElement('div');
+                    card.className = 'mini-card';
+                    card.textContent = val;
+                    listEl.appendChild(card);
+                });
             }
         }
     }
@@ -200,14 +236,11 @@ class GameController {
         });
 
         const countEl = document.getElementById('matching-count');
+        const num = this.players.length;
+        if (countEl) countEl.textContent = `現在 ${num} 名待機中。`;
+
         const hostBtn = document.getElementById('host-controls');
-        if (this.isHost) {
-            if (hostBtn) hostBtn.style.display = 'block';
-            if (countEl) countEl.textContent = `現在 ${this.players.length} 名待機中... あなたが軍記（ホスト）です。`;
-        } else {
-            if (hostBtn) hostBtn.style.display = 'none';
-            if (countEl) countEl.textContent = `現在 ${this.players.length} 名待機中... 開始を待っています。`;
-        }
+        if (hostBtn) hostBtn.style.display = (this.isHost && num >= 2) ? 'block' : 'none';
     }
 
     updateOpponentsUI() {
@@ -221,81 +254,39 @@ class GameController {
                     const hand = p.hand ? p.hand.length : 10;
                     const cc = el.querySelector('.card-count');
                     if (cc) cc.textContent = `🃏 ${hand}枚`;
+                    // 獲得エリアのテキスト更新
+                    const invText = el.querySelector('div:nth-child(2)');
+                    if (invText) invText.textContent = `獲得: ${inv}枚`;
                 }
             }
         });
     }
 
     startCountingState() {
-        if (this.currentPhase === "counting" || this.currentPhase === "transitioning") return;
-        this.currentPhase = "counting";
+        if (!this.isHost) return;
         this.roomRef.child('gameStatus').set({ phase: 'counting' });
     }
 
-    forceStartWithAI() {
-        if (!this.isHost || (this.currentPhase !== "" && this.currentPhase !== "waiting")) return;
-        this.log("Force Start with AI initiated.");
-        this.playSE('select');
-        this.addBots();
-        setTimeout(() => this.startCountingState(), 500);
-    }
-
-    addBots() {
-        const botNames = ["信長", "秀吉", "家康", "幸村", "政宗"];
-        let count = this.players.length;
-        while (count < 3) {
-            const id = "bot_" + Math.random().toString(36).substr(2, 9);
-            const name = botNames.splice(Math.floor(Math.random() * botNames.length), 1)[0] + "(AI)";
-            const bot = {
-                id: id, name: name, isHuman: false,
-                hand: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], inventory: [],
-                character: CHARACTERS[Math.floor(Math.random() * CHARACTERS.length)],
-                joinedAt: Date.now() + count,
-                hasPlayed: false, selectedValue: null
-            };
-            this.roomRef.child('players').child(id).set(bot);
-            count++;
-        }
-    }
-
     executeCounting() {
-        this.currentPhase = "counting";
-        this.log("Phase -> Counting");
+        this.stopAllTimers();
         this.playSE('match');
-        const countEl = document.getElementById('matching-count');
-        const hostBtn = document.getElementById('host-controls');
-        if (hostBtn) hostBtn.style.display = 'none';
-
+        this.switchTo('matching-screen');
         let sec = 5;
-        if (this.timerInterval) clearInterval(this.timerInterval);
-
-        this.timerInterval = setInterval(() => {
-            if (countEl) countEl.innerHTML = `<span style="font-size:1.8rem; color:var(--gold); font-weight:bold;">軍議開始まで ${sec}...</span>`;
-
+        this.syncTimer = setInterval(() => {
+            const el = document.getElementById('matching-count');
+            if (el) el.innerHTML = `<span style="font-size:2rem; color:var(--gold);">軍議開始まで ${sec}...</span>`;
             if (sec <= 0) {
-                clearInterval(this.timerInterval);
-                this.timerInterval = null;
-                this.log("Countdown reached zero.");
-                if (this.isHost) {
-                    this.log("Host triggering selection phase...");
-                    this.roomRef.child('gameStatus').update({
-                        phase: 'selection',
-                        round: 1,
-                        timestamp: firebase.database.ServerValue.TIMESTAMP
-                    });
-                }
+                if (this.isHost) this.roomRef.child('gameStatus').set({ phase: 'selection', round: 1 });
+                clearInterval(this.syncTimer);
             }
             sec--;
         }, 1000);
     }
 
     executeSelection() {
-        this.currentPhase = "selection";
+        this.stopAllTimers();
         this.switchTo('char-selection-screen');
         this.renderSelectionCards();
-        if (this.bgm && this.bgm.paused) {
-            this.bgm.play().catch(e => { console.warn("BGM Play failed:", e) });
-        }
     }
 
     renderSelectionCards() {
@@ -306,17 +297,12 @@ class GameController {
         pool.forEach(char => {
             const card = document.createElement('div');
             card.className = 'card character selectable-char';
-            card.innerHTML = `
-                <img src="${char.img}" style="width:100%; height:110px; object-fit:cover;">
-                <div style="padding:10px; color:#fff;">
-                    <div style="font-weight:bold; color:var(--gold); margin-bottom:5px;">${char.name}</div>
-                    <div style="font-size:0.75rem; color:#ccc; line-height:1.3;">${char.effect}</div>
-                </div>
-            `;
+            card.innerHTML = `<img src="${char.img}"><div class="info-box"><div class="name">${char.name}</div><div class="selection-effect-text">${char.effect}</div></div>`;
             card.onclick = () => {
                 this.playSE('select');
                 this.roomRef.child('players').child(this.myPlayerId).update({ character: char });
-                container.innerHTML = `<h2 class="glow-text">他の軍師の決断を待っています...</h2>`;
+                container.innerHTML = `<h2 class="glow-text" style="grid-column:1/-1;">全軍師の決断を待っています...</h2>`;
+                if (this.bgm && this.bgm.paused) this.bgm.play().catch(() => { });
             };
             container.appendChild(card);
         });
@@ -324,10 +310,10 @@ class GameController {
 
     prepareNextRound(r) {
         if (!this.isHost) return;
-        this.deck = [];
-        for (let i = 0; i < 15; i++) for (let v = 1; v <= 7; v++) this.deck.push(v);
-        this.deck.sort(() => Math.random() - 0.5);
-        const center = this.deck.splice(0, this.players.length);
+        const deck = [];
+        for (let i = 0; i < 15; i++) for (let v = 1; v <= 7; v++) deck.push(v);
+        deck.sort(() => Math.random() - 0.5);
+        const center = deck.splice(0, this.players.length);
 
         const updates = {};
         this.players.forEach(p => {
@@ -335,12 +321,11 @@ class GameController {
             updates[`players/${p.id}/selectedValue`] = null;
         });
         updates['gameStatus'] = { phase: 'playing', round: r, centerCards: center };
-
         this.roomRef.update(updates);
     }
 
     executePlaying() {
-        this.currentPhase = "playing";
+        this.stopAllTimers();
         this.switchTo('main-game-screen');
         if (this.round > 10) { this.showFinalResults(); return; }
         const rd = document.getElementById('current-round');
@@ -349,13 +334,11 @@ class GameController {
         this.renderGameField();
         this.renderMyHand();
         this.startRoundTimer();
-        if (this.isHost) this.processAIPlays();
     }
 
     setupGameUI() {
         const bar = document.getElementById('opponents-bar');
-        if (!bar) return;
-        bar.innerHTML = '';
+        if (!bar) return; bar.innerHTML = '';
         this.players.forEach(p => {
             if (p.id !== this.myPlayerId) {
                 const el = document.createElement('div');
@@ -376,6 +359,10 @@ class GameController {
     }
 
     renderGameField() {
+        // ラウンド開始時に前回のログを掃除
+        const log = document.getElementById('resolution-log');
+        if (log) log.innerHTML = '';
+
         const grid = document.getElementById('reward-slots');
         if (!grid) return; grid.innerHTML = '';
         this.centerCards.forEach((v, i) => {
@@ -405,78 +392,117 @@ class GameController {
         this.timer = 60;
         const el = document.getElementById('timer-sec');
         if (!el) return; el.textContent = this.timer;
-        if (this.timerInterval) clearInterval(this.timerInterval);
-        this.timerInterval = setInterval(() => {
+        this.gameTimer = setInterval(() => {
             this.timer--; el.textContent = this.timer;
             if (this.timer <= 0) {
-                clearInterval(this.timerInterval);
+                clearInterval(this.gameTimer);
                 const me = this.players.find(p => p.id === this.myPlayerId);
-                if (me && !me.hasPlayed && me.hand && me.hand.length > 0) this.handleCardSubmission(me.hand[0]);
+                if (me && !me.hasPlayed) this.handleCardSubmission(me.hand[0]);
             }
         }, 1000);
     }
 
     handleCardSubmission(val) {
-        this.playSE('select');
         const me = this.players.find(p => p.id === this.myPlayerId);
         if (!me) return;
+        this.playSE('select');
         const nh = me.hand.filter(v => v !== val);
         this.roomRef.child('players').child(this.myPlayerId).update({
             selectedValue: val, hand: nh, hasPlayed: true
-        }).then(() => {
-            this.log(`Submitted: ${val}`);
-            // Firebaseが更新された後にUIを再描画し、確実にプレイヤーの状態を同期
-            this.roomRef.child('players').child(this.myPlayerId).once('value', (s) => {
-                const updatedMe = s.val();
-                if (updatedMe) {
-                    const idx = this.players.findIndex(p => p.id === this.myPlayerId);
-                    if (idx !== -1) this.players[idx] = updatedMe;
-                    this.renderMyHand();
-                }
-            });
-        });
-    }
-
-    processAIPlays() {
-        this.players.forEach(p => {
-            if (!p.isHuman && !p.hasPlayed) {
-                setTimeout(() => {
-                    if (this.currentPhase !== 'playing') return;
-                    const val = p.hand[Math.floor(Math.random() * p.hand.length)];
-                    const nh = p.hand.filter(v => v !== val);
-                    this.roomRef.child('players').child(p.id).update({
-                        selectedValue: val, hand: nh, hasPlayed: true
-                    });
-                }, 2000 + Math.random() * 3000);
-            }
         });
     }
 
     async processResolution() {
-        this.playSE('resolve');
+        if (!this.isHost) return;
+
+        // ホストが最終的な判定結果を確定させ、DBに書き込む
         const snap = await this.roomRef.child('players').once('value');
         const ps = Object.values(snap.val() || {});
         const bids = ps.map(p => ({ pId: p.id, val: p.selectedValue }));
-
-        const rwrds = [...this.centerCards].sort((a, b) => b - a);
+        // 【修正】報酬カードをソートせず、配列の順序（左から順）を使用する
+        const rwrds = [...this.centerCards];
         const vC = {};
         bids.forEach(b => vC[b.val] = (vC[b.val] || 0) + 1);
         const valid = bids.filter(b => vC[b.val] === 1).sort((a, b) => b.val - a.val);
+
+        const updates = {};
+        valid.forEach((bid, i) => {
+            if (i < rwrds.length) {
+                const player = ps.find(x => x.id === bid.pId);
+                const currentInv = player.inventory || [];
+                currentInv.push(rwrds[i]);
+                updates[`players/${bid.pId}/inventory`] = currentInv;
+            }
+        });
+
+        // インベントリの更新（演出は各自が自動で実行する）
+        await this.roomRef.update(updates);
+
+        // 次のラウンドへの遷移（演出時間を考慮して2秒待つ）
+        setTimeout(() => this.prepareNextRound(this.round + 1), 2000);
+    }
+
+    async runResolutionUI() {
+        this.playSE('resolve');
+        this.log("Running Resolution UI...");
+
+        const ps = this.players;
+        const bids = ps.map(p => ({ pId: p.id, val: p.selectedValue, name: p.name }));
+        const rwrds = [...this.centerCards]; // 【重要】ここもソートしない
+        const vC = {};
+        bids.forEach(b => vC[b.val] = (vC[b.val] || 0) + 1);
+        const valid = bids.filter(b => vC[b.val] === 1).sort((a, b) => b.val - a.val);
+
+        const logContainer = document.getElementById('resolution-log');
+        if (logContainer) logContainer.innerHTML = '';
+
+        // まずバッティング（被り）のログを表示
+        const duplicates = bids.filter(b => vC[b.val] > 1);
+        const dupValues = [...new Set(duplicates.map(d => d.val))];
+        dupValues.forEach(v => {
+            const names = bids.filter(b => b.val === v).map(b => b.name).join(' と ');
+            const logItem = document.createElement('div');
+            logItem.className = 'log-item conflict';
+            logItem.textContent = `⚠️ [${v}] が被り！ (${names})`;
+            logContainer.appendChild(logItem);
+        });
+
+        // 提出された数字を相手のバーに一時的に表示
+        ps.forEach(p => {
+            if (p.id !== this.myPlayerId) {
+                const el = document.getElementById(`player-stat-${p.id}`);
+                if (el) {
+                    const bidVal = p.selectedValue || "?";
+                    const reveal = document.createElement('div');
+                    reveal.className = 'reveal-val';
+                    reveal.textContent = bidVal;
+                    el.appendChild(reveal);
+                }
+            } else {
+                // 自分の出したカードも再確認表示
+                const hand = document.getElementById('my-hand');
+                if (hand) hand.classList.remove('selectable');
+            }
+        });
 
         const anims = [];
         valid.forEach((bid, i) => {
             if (i < rwrds.length) {
                 const p = ps.find(x => x.id === bid.pId);
-                const idx = this.centerCards.indexOf(rwrds[i]);
+                const idx = i; // 左からの配布なのでインデックス i がそのまま centerCards のスロットに対応
                 anims.push(this.startFlyAnim(idx, p));
-                if (p.id === this.myPlayerId) {
-                    const inv = p.inventory || []; inv.push(rwrds[i]);
-                    this.roomRef.child('players').child(this.myPlayerId).update({ inventory: inv });
+
+                // 獲得ログの追加
+                if (logContainer) {
+                    const logItem = document.createElement('div');
+                    logItem.className = 'log-item success';
+                    logItem.textContent = `✨ ${p.name}: [${bid.val}] を出し [${rwrds[idx]}] を獲得！`;
+                    logContainer.appendChild(logItem);
                 }
             }
         });
+
         await Promise.all(anims);
-        if (this.isHost) setTimeout(() => this.prepareNextRound(this.round + 1), 2000);
     }
 
     startFlyAnim(sIdx, player) {
@@ -492,15 +518,22 @@ class GameController {
             card.style.visibility = 'hidden';
             const acq = document.getElementById(`acquirer-${sIdx}`);
             if (acq) acq.textContent = player.name;
-            const target = (player.id === this.myPlayerId) ? document.getElementById('my-inventory-count') : document.getElementById(`player-stat-${player.id}`);
+
+            const isMe = (player.id === this.myPlayerId);
+            const target = isMe ? document.getElementById('my-inventory-count') : document.getElementById(`player-stat-${player.id}`);
             if (!target) { flyer.remove(); return res(); }
+
             const tRect = target.getBoundingClientRect();
             setTimeout(() => {
                 flyer.style.left = (tRect.left + tRect.width / 2 - 20) + 'px';
                 flyer.style.top = (tRect.top + tRect.height / 2 - 20) + 'px';
                 flyer.style.transform = 'scale(0.2)'; flyer.style.opacity = '0';
             }, 50);
-            setTimeout(() => { flyer.remove(); res(); }, 850);
+            setTimeout(() => {
+                flyer.remove();
+                if (isMe) this.updateInventoryCount();
+                res();
+            }, 850);
         });
     }
 
@@ -524,8 +557,11 @@ class GameController {
 
     switchTo(id) {
         document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-        const target = document.getElementById(id); if (target) target.classList.add('active');
+        const target = document.getElementById(id);
+        if (target) {
+            target.classList.add('active');
+            this.log(`UI Active: ${id}`);
+        }
     }
 }
 const game = new GameController(); window.game = game;
-

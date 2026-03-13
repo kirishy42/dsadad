@@ -192,7 +192,7 @@ body {
 
 .card.character img {
     width: 100%;
-    height: 110px;
+    height: 180px;
     object-fit: cover;
     border-bottom: 2px solid var(--gold);
 }

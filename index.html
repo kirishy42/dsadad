@@ -30,6 +30,10 @@
                     <button class="premium-btn" onclick="game.tryLogin()">マッチング開始</button>
                     <button class="premium-btn secondary" onclick="alert('遊び方: 全10ラウンドの入札バトル。被れば獲得なし！')">遊び方</button>
                 </div>
+                <div style="margin-top: 20px;">
+                    <button class="premium-btn" style="background: var(--danger); font-size: 0.7rem; padding: 8px 15px;"
+                        onclick="game.resetRoom()">緊急ルームリセット (不具合時)</button>
+                </div>
             </div>
         </div>
 
@@ -46,7 +50,7 @@
                     <div class="chip">あなた</div>
                 </div>
                 <div id="host-controls" class="button-group" style="margin-top: 20px; display: none;">
-                    <button class="premium-btn" onclick="game.forceStartWithAI()">AIを補充して今すぐ開始</button>
+                    <button class="premium-btn" onclick="game.startCountingState()">軍議（対局）を開始する</button>
                 </div>
             </div>
         </div>
@@ -80,6 +84,8 @@
                     <div id="reward-slots" class="reward-grid">
                         <!-- Rewards and Acquirers here -->
                     </div>
+
+                    <div id="resolution-log" class="resolution-log"></div>
 
                     <div class="field-label">大きい数字を出した順に左から取得（被りは無効）</div>
                 </div>
